@@ -35,6 +35,8 @@ private:
     Disk disk;
     // size of a FAT entry is 2 bytes
     int16_t fat[BLOCK_SIZE/2];
+    uint16_t current_dir = ROOT_BLOCK; // Start at the root directory
+
 
 public:
     FS();
