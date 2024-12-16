@@ -525,10 +525,43 @@ int FS::mkdir(std::string dirpath)
 }
 
 // cd <dirpath> changes the current (working) directory to the directory named <dirpath>
-int FS::cd(std::string dirpath)
-{
-    return 0;
+int FS::cd(std::string dirpath) {
+    std::cout << "FS::cd(" << dirpath << ")\n";
+
+    if (dirpath == "/") {
+        // Go to root directory
+        current_dir = ROOT_BLOCK;
+        return 0;
+    }
+
+    // Handle relative paths and parent directory
+    if (dirpath == "..") {
+        if (current_dir == ROOT_BLOCK) {
+            std::cout << "Error: Already at root directory\n";
+            return -1;
+        }
+        // Fetch and set the parent directory
+        dir_entry parent_entry;
+        disk.read(current_dir, reinterpret_cast<uint8_t*>(&parent_entry));
+        current_dir = parent_entry.first_blk;
+        return 0;
+    }
+
+    // Handle navigation to a specific sub-directory
+    dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
+    disk.read(current_dir, reinterpret_cast<uint8_t*>(entries));
+
+    for (auto &entry : entries) {
+        if (entry.type == TYPE_DIR && dirpath == std::string(entry.file_name)) {
+            current_dir = entry.first_blk;
+            return 0;
+        }
+    }
+
+    std::cout << "Error: Directory not found\n";
+    return -1;
 }
+
 
 // pwd prints the full path, i.e., from the root directory, to the current
 // directory, including the currect directory name
