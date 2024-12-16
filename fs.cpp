@@ -196,7 +196,7 @@ int FS::ls() {
     // Print header line
     std::cout << "name\tsize\n";
 
-    // Iterate through root directory entries and print files
+    // Iterate through root directory entries and print files/directories
     for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
         if (dir_entries[i].file_name[0] != '\0') {  // Check if the entry is not empty
             std::cout << dir_entries[i].file_name << "\t";
