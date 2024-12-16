@@ -1,0 +1,513 @@
+#include "fs.h"
+#include "disk.h"
+#include <stdint.h>
+//Using C++20
+
+
+FS::FS()
+{
+
+    // Ensure disk is initialized
+    if (!disk.read(FAT_BLOCK, reinterpret_cast<uint8_t*>(fat))) {
+        std::cerr << "Warning: Unable to read FAT; initializing as new disk" << std::endl;
+    }
+}
+
+FS::~FS()
+{
+
+}
+
+// formats the disk, i.e., creates an empty file system
+int FS::format() {
+
+    // Initialize FAT (mark all blocks as free except for block 0 and block 1)
+    for (unsigned i = 0; i < BLOCK_SIZE / 2; ++i) {
+        if (i == ROOT_BLOCK || i == FAT_BLOCK) {
+            fat[i] = FAT_EOF; // Mark root and FAT blocks as special
+        } else {
+            fat[i] = FAT_FREE; // Mark other blocks as free
+        }
+    }
+
+    // Initialize root directory
+    dir_entry root_dir;
+    std::memset(&root_dir, 0, sizeof(root_dir));
+    root_dir.first_blk = ROOT_BLOCK;  // Root directory's first block
+    root_dir.type = TYPE_DIR;         // Root is a directory
+    root_dir.size = 0;                // Initially empty
+
+    // Write root directory entry to block 0 (the root block)
+    uint8_t root_block[BLOCK_SIZE] = {0};
+    std::memcpy(root_block, &root_dir, sizeof(root_dir));
+    disk.write(ROOT_BLOCK, root_block);
+
+    std::cout << "Disk formatted successfully\n";
+    return 0;
+}
+
+int FS::create(std::string filepath) {
+
+  	// Validate file name length
+    if (filepath.length() >= 56) {
+        std::cerr << "Error: File name exceeds the maximum length of 55 characters.\n";
+        return -1; // Error code for invalid file name
+    }
+    // Check if the file already exists by searching the root directory
+    uint8_t root_block[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, root_block);
+    dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
+
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name == filepath) {
+            std::cout << "File already exists: " << filepath << "\n";
+            return -1; // File exists, return error
+        }
+    }
+    // Declare and initialize entry_count
+    int entry_count = 0;
+
+    // Iterate through all directory entries
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name[0] != '\0') { // Entry is in use
+            entry_count++;
+            if (std::string(root_entries[i].file_name) == filepath) {
+                std::cerr << "Error: File already exists: " << filepath << "\n";
+                return -1; // File already exists
+            }
+        }
+    }
+	    // Add this check for directory full condition
+    if (entry_count >= BLOCK_SIZE / sizeof(dir_entry)) {
+        std::cerr << "Error: Directory full, cannot add more entries.\n";
+        return -1; // Return error if the directory is full
+    }
+
+    // Find free block for the file
+    int first_free_block = -1;
+    for (int i = 0; i < BLOCK_SIZE / 2; ++i) {
+        if (fat[i] == FAT_FREE) {
+            first_free_block = i;
+            break;
+        }
+    }
+
+    if (first_free_block == -1) {
+        std::cout << "No free block available\n";
+        return -1; // No free blocks
+    }
+
+    // Write data (accept multiple lines from user until empty line)
+    std::string file_data;
+    std::string line;
+    while (std::getline(std::cin, line) && !line.empty()) {
+        file_data += line + "\n";
+    }
+
+    // Split file data into blocks
+    size_t total_blocks = (file_data.size() + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    int last_block = first_free_block;
+    for (size_t i = 0; i < total_blocks; ++i) {
+        uint8_t block[BLOCK_SIZE] = {0};
+        size_t start = i * BLOCK_SIZE;
+        size_t len = std::min(static_cast<size_t>(BLOCK_SIZE), file_data.size() - start);
+        std::memcpy(block, file_data.data() + start, len);
+        disk.write(last_block, block);
+
+        // Update FAT
+        if (i < total_blocks - 1) {
+            fat[last_block] = i + 1;
+            last_block = i + 1;
+        } else {
+            fat[last_block] = FAT_EOF; // Mark last block as EOF
+        }
+    }
+
+    // Write FAT back to disk
+    uint8_t fat_block[BLOCK_SIZE] = {0};
+    std::memcpy(fat_block, fat, sizeof(fat));
+    disk.write(FAT_BLOCK, fat_block);
+
+    // Update root directory with the new file
+    dir_entry new_file = {0};
+    std::strncpy(new_file.file_name, filepath.c_str(), sizeof(new_file.file_name) - 1);
+    new_file.first_blk = first_free_block;
+    new_file.size = file_data.size();
+    new_file.type = TYPE_FILE;
+    new_file.access_rights = READ | WRITE;
+
+    disk.read(ROOT_BLOCK, root_block);
+    root_entries = reinterpret_cast<dir_entry*>(root_block);
+
+    // Find the first free entry in the root directory
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name[0] == '\0') {
+            root_entries[i] = new_file;
+            break;
+        }
+    }
+
+    // Write updated root directory back to disk
+    disk.write(ROOT_BLOCK, root_block);
+
+    std::cout << "File " << filepath << " created successfully\n";
+    return 0;
+}
+
+int FS::cat(std::string filepath) {
+
+    // Find file in root directory
+    uint8_t root_block[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, root_block);
+    dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
+
+    dir_entry* file_entry = nullptr;
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name == filepath) {
+            file_entry = &root_entries[i];
+            break;
+        }
+    }
+
+    if (!file_entry) {
+        std::cout << "File not found: " << filepath << "\n";
+        return -1; // File not found
+    }
+
+    // Read the file data using the FAT
+    int block = file_entry->first_blk;
+    while (block != FAT_EOF) {
+        uint8_t block_data[BLOCK_SIZE] = {0};
+        disk.read(block, block_data);
+        std::cout.write(reinterpret_cast<char*>(block_data), BLOCK_SIZE);
+        block = fat[block];
+    }
+
+    return 0;
+}
+
+
+// ls lists the content in the currect directory (files and sub-directories)
+int FS::ls() {
+    uint8_t root_block[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, root_block);
+    dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
+
+    // Print header line
+    std::cout << "name\tsize\n";
+
+    // Iterate through root directory entries and print files
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name[0] != '\0') {
+            // Use tab character for alignment
+            std::cout << root_entries[i].file_name << "\t" << root_entries[i].size << "\n";
+        }
+    }
+
+    return 0;
+}
+
+
+// cp <sourcepath> <destpath> makes an exact copy of the file
+// <sourcepath> to a new file <destpath>
+int FS::cp(std::string sourcepath, std::string destpath) {
+
+    // Locate source file in root directory
+    uint8_t root_block[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, root_block);
+    dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
+
+    dir_entry* source_file = nullptr;
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name == sourcepath) {
+            source_file = &root_entries[i];
+            break;
+        }
+    }
+
+    if (!source_file) {
+        std::cout << "Source file not found: " << sourcepath << "\n";
+        return -1; // Source file not found
+    }
+
+    // Check if destination file already exists
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name == destpath) {
+            std::cout << "Destination file already exists: " << destpath << "\n";
+            return -1; // Destination file exists
+        }
+    }
+
+    // Allocate a new directory entry for the destination file
+    dir_entry new_file = {0};
+    std::strncpy(new_file.file_name, destpath.c_str(), sizeof(new_file.file_name) - 1);
+    new_file.size = source_file->size;
+    new_file.type = source_file->type;
+    new_file.access_rights = source_file->access_rights;
+
+    // Copy the file's content block by block
+    int src_block = source_file->first_blk;
+    int prev_block = -1;
+
+    while (src_block != FAT_EOF) {
+        // Find a free block for the copy
+        int dest_block = -1;
+        for (int i = 0; i < BLOCK_SIZE / 2; ++i) {
+            if (fat[i] == FAT_FREE) {
+                dest_block = i;
+                break;
+            }
+        }
+        if (dest_block == -1) {
+            std::cout << "No free blocks available for copying\n";
+            return -1;
+        }
+
+        // Read source block and write to destination block
+        uint8_t block_data[BLOCK_SIZE] = {0};
+        disk.read(src_block, block_data);
+        disk.write(dest_block, block_data);
+
+        // Update FAT for the new file
+        if (prev_block == -1) {
+            new_file.first_blk = dest_block; // First block of the new file
+        } else {
+            fat[prev_block] = dest_block; // Link the previous block
+        }
+        prev_block = dest_block;
+
+        // Continue to the next block in the source file
+        src_block = fat[src_block];
+    }
+
+    // Mark the last block as EOF
+    fat[prev_block] = FAT_EOF;
+
+    // Write FAT back to disk
+    uint8_t fat_block[BLOCK_SIZE] = {0};
+    std::memcpy(fat_block, fat, sizeof(fat));
+    disk.write(FAT_BLOCK, fat_block);
+
+    // Add the new file to the root directory
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name[0] == '\0') {
+            root_entries[i] = new_file;
+            break;
+        }
+    }
+
+    // Write updated root directory back to disk
+    disk.write(ROOT_BLOCK, root_block);
+
+    std::cout << "File copied successfully\n";
+    return 0;
+}
+
+
+// mv <sourcepath> <destpath> renames the file <sourcepath> to the name <destpath>,
+// or moves the file <sourcepath> to the directory <destpath> (if dest is a directory)
+int FS::mv(std::string sourcepath, std::string destpath) {
+
+    // Locate source file in root directory
+    uint8_t root_block[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, root_block);
+    dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
+
+    dir_entry* source_file = nullptr;
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name == sourcepath) {
+            source_file = &root_entries[i];
+            break;
+        }
+    }
+
+    if (!source_file) {
+        std::cout << "Source file not found: " << sourcepath << "\n";
+        return -1; // Source file not found
+    }
+
+    // Check if destination file already exists
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name == destpath) {
+            std::cout << "Destination file already exists: " << destpath << "\n";
+            return -1; // Destination file exists
+        }
+    }
+
+    // Rename the file
+    std::strncpy(source_file->file_name, destpath.c_str(), sizeof(source_file->file_name) - 1);
+
+    // Write updated root directory back to disk
+    disk.write(ROOT_BLOCK, root_block);
+
+    std::cout << "File renamed successfully\n";
+    return 0;
+}
+
+
+// rm <filepath> removes / deletes the file <filepath>
+int FS::rm(std::string filepath) {
+
+    // Locate the file in root directory
+    uint8_t root_block[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, root_block);
+    dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
+
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (root_entries[i].file_name == filepath) {
+            // Free all blocks used by the file
+            int block = root_entries[i].first_blk;
+            while (block != FAT_EOF) {
+                int next_block = fat[block];
+                fat[block] = FAT_FREE;
+                block = next_block;
+            }
+
+            // Clear the directory entry
+            std::memset(&root_entries[i], 0, sizeof(dir_entry));
+
+            // Write FAT and root directory back to disk
+            uint8_t fat_block[BLOCK_SIZE] = {0};
+            std::memcpy(fat_block, fat, sizeof(fat));
+            disk.write(FAT_BLOCK, fat_block);
+            disk.write(ROOT_BLOCK, root_block);
+
+            std::cout << "File deleted successfully\n";
+            return 0;
+        }
+    }
+
+    std::cout << "File not found: " << filepath << "\n";
+    return -1; // File not found
+}
+
+
+// append <filepath1> <filepath2> appends the contents of file <filepath1> to
+// the end of file <filepath2>. The file <filepath1> is unchanged.
+int FS::append(std::string filepath1, std::string filepath2) {
+    // Step 1: Locate filepath1 and filepath2 in the root directory
+    dir_entry file1_entry, file2_entry;
+    bool file1_found = false, file2_found = false;
+
+    // Read the root directory to find the entries
+    uint8_t block[BLOCK_SIZE];
+    if (disk.read(ROOT_BLOCK, block) != 0) {
+        std::cerr << "ERROR: Failed to read root directory\n";
+        return -1;
+    }
+
+    dir_entry* dir_entries = reinterpret_cast<dir_entry*>(block);
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); i++) {
+        if (std::string(dir_entries[i].file_name) == filepath1) {
+            file1_entry = dir_entries[i];
+            file1_found = true;
+        }
+        if (std::string(dir_entries[i].file_name) == filepath2) {
+            file2_entry = dir_entries[i];
+            file2_found = true;
+        }
+    }
+
+    if (!file1_found) {
+        std::cerr << "ERROR: File " << filepath1 << " not found\n";
+        return -1;
+    }
+
+    if (!file2_found) {
+        std::cerr << "ERROR: File " << filepath2 << " not found\n";
+        return -1;
+    }
+
+    // Step 2: Read the contents of file1 into a buffer
+    std::vector<uint8_t> file1_data;
+    int current_block = file1_entry.first_blk;
+    while (current_block != FAT_EOF) {
+        if (disk.read(current_block, block) != 0) {
+            std::cerr << "ERROR: Failed to read data block for " << filepath1 << "\n";
+            return -1;
+        }
+        file1_data.insert(file1_data.end(), block, block + BLOCK_SIZE);
+        current_block = fat[current_block];
+    }
+
+    // Step 3: Find the last block of file2
+    int last_block = file2_entry.first_blk;
+    while (fat[last_block] != FAT_EOF) {
+        last_block = fat[last_block];
+    }
+
+    // Step 4: Calculate space left in the last block of file2
+    size_t remaining_space_in_last_block = BLOCK_SIZE - (file2_entry.size % BLOCK_SIZE);
+
+    // Step 5: Write data from file1 to file2
+    size_t data_offset = 0;
+    while (data_offset < file1_data.size()) {
+        // If there's remaining space in the last block of file2, use it
+        if (remaining_space_in_last_block > 0) {
+            size_t bytes_to_write = std::min(remaining_space_in_last_block, file1_data.size() - data_offset);
+            disk.write(last_block, file1_data.data() + data_offset, bytes_to_write);
+            data_offset += bytes_to_write;
+            remaining_space_in_last_block -= bytes_to_write;
+
+            // If there's no space left in the last block, allocate a new block
+            if (remaining_space_in_last_block == 0) {
+                int new_block = -1;
+                for (int i = 0; i < BLOCK_SIZE / 2; i++) {
+                    if (fat[i] == FAT_FREE) {
+                        new_block = i;
+                        fat[i] = FAT_EOF; // Mark the new block as EOF initially
+                        break;
+                    }
+                }
+                if (new_block == -1) {
+                    std::cerr << "ERROR: No free blocks available for appending\n";
+                    return -1;
+                }
+
+                // Update the FAT to link the last block to the new block
+                fat[last_block] = new_block;
+                last_block = new_block;
+                remaining_space_in_last_block = BLOCK_SIZE;  // Reset space for the new block
+            }
+        }
+    }
+
+    // Step 6: Update the FAT for file2 (mark the last block as EOF)
+    fat[last_block] = FAT_EOF;
+
+    // Step 7: Update the size of file2 in the directory entry
+    file2_entry.size += file1_data.size();
+    disk.write(ROOT_BLOCK, block);  // Write the updated directory entry back to disk
+
+    std::cout << "File " << filepath1 << " successfully appended to " << filepath2 << "\n";
+    return 0; // Successfully appended
+}
+
+
+
+// mkdir <dirpath> creates a new sub-directory with the name <dirpath>
+// in the current directory
+int FS::mkdir(std::string dirpath)
+{
+    return 0;
+}
+
+// cd <dirpath> changes the current (working) directory to the directory named <dirpath>
+int FS::cd(std::string dirpath)
+{
+    return 0;
+}
+
+// pwd prints the full path, i.e., from the root directory, to the current
+// directory, including the currect directory name
+int FS::pwd()
+{
+    return 0;
+}
+
+// chmod <accessrights> <filepath> changes the access rights for the
+// file <filepath> to <accessrights>.
+int FS::chmod(std::string accessrights, std::string filepath)
+{
+    return 0;
+}
