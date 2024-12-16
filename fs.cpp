@@ -385,8 +385,6 @@ int FS::rm(std::string filepath) {
 // append <filepath1> <filepath2> appends the contents of file <filepath1> to
 // the end of file <filepath2>. The file <filepath1> is unchanged.
 int FS::append(std::string filepath1, std::string filepath2) {
-    std::cout << "FS::append(" << filepath1 << ", " << filepath2 << ")\n";
-
     // Buffer to read/write disk blocks
     uint8_t buffer[BLOCK_SIZE];
 
@@ -501,13 +499,21 @@ int FS::append(std::string filepath1, std::string filepath2) {
 
     // Update the FAT and directory entries on disk
     disk.write(FAT_BLOCK, reinterpret_cast<uint8_t*>(fat));
-    std::memcpy(dir_entries, &file2, sizeof(dir_entry));
-    disk.write(ROOT_BLOCK, buffer);
+
+    // Update file2 directory entry with the new size and first block (if modified)
+    disk.read(ROOT_BLOCK, buffer);  // Re-read root block before modifying
+    dir_entries = reinterpret_cast<dir_entry*>(buffer); // Update dir_entries pointer after reading
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (std::string(dir_entries[i].file_name) == filepath2) {
+            dir_entries[i] = file2;  // Update file2 entry
+            break;
+        }
+    }
+
+    disk.write(ROOT_BLOCK, buffer);  // Write back updated directory
 
     return 0;
 }
-
-
 
 
 
