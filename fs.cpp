@@ -189,9 +189,9 @@ int FS::cat(std::string filepath) {
 
 // ls lists the content in the currect directory (files and sub-directories)
 int FS::ls() {
-    uint8_t root_block[BLOCK_SIZE];
-    disk.read(ROOT_BLOCK, root_block);
-    dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
+    uint8_t buffer[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, buffer);
+    dir_entry* dir_entries = reinterpret_cast<dir_entry*>(buffer);
 
     // Print header line with type
     std::cout << "name\ttype\tsize\n";
@@ -641,8 +641,48 @@ int FS::cd(std::string dirpath) {
 
 // pwd prints the full path, i.e., from the root directory, to the current
 // directory, including the currect directory name
-int FS::pwd()
-{
+int FS::pwd() {
+    std::cout << "FS::pwd()\n";
+
+    // Stack to hold directory names for constructing the full path
+    std::vector<std::string> path_stack;
+
+    uint16_t current_block = current_dir;
+
+    while (current_block != ROOT_BLOCK) {
+        // Read the current directory block
+        dir_entry entries[BLOCK_SIZE / sizeof(dir_entry)];
+        disk.read(current_block, reinterpret_cast<uint8_t*>(entries));
+
+        // Find the directory entry that points to the parent directory (..)
+        dir_entry *parent_entry = nullptr;
+        for (auto &entry : entries) {
+            if (std::string(entry.file_name) == "..") {
+                parent_entry = &entry;
+            } else if (std::string(entry.file_name) != ".." && std::string(entry.file_name) != "") {
+                // Add the current directory name to the path stack
+                path_stack.push_back(std::string(entry.file_name));
+            }
+        }
+
+        if (!parent_entry) {
+            std::cout << "Error: Parent directory not found\n";
+            return -1;
+        }
+
+        // Move to the parent directory
+        current_block = parent_entry->first_blk;
+    }
+
+    // Build the full path
+    std::string full_path = "/";
+    for (auto it = path_stack.rbegin(); it != path_stack.rend(); ++it) {
+        full_path += *it + "/";
+    }
+
+    // Print the path
+    std::cout << (full_path.empty() ? "/" : full_path) << std::endl;
+
     return 0;
 }
 
