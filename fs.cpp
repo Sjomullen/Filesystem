@@ -198,9 +198,18 @@ int FS::ls() {
 
     // Iterate through root directory entries and print files
     for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
-        if (root_entries[i].file_name[0] != '\0') {
-            // Use tab character for alignment
-            std::cout << root_entries[i].file_name << "\t" << root_entries[i].size << "\n";
+        if (dir_entries[i].file_name[0] != '\0') {  // Check if the entry is not empty
+            std::cout << dir_entries[i].file_name << "\t";
+
+            // Print the type: 'dir' for directory, 'file' for file
+            if (dir_entries[i].type == 1) {
+                std::cout << "dir";
+            } else {
+                std::cout << "file";
+            }
+
+            // Print the size
+            std::cout << "\t" << dir_entries[i].size << "\n";
         }
     }
 
