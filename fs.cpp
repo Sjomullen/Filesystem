@@ -519,8 +519,75 @@ int FS::append(std::string filepath1, std::string filepath2) {
 
 // mkdir <dirpath> creates a new sub-directory with the name <dirpath>
 // in the current directory
-int FS::mkdir(std::string dirpath)
-{
+int FS::mkdir(std::string dirpath) {
+    uint8_t buffer[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, buffer);  // Read root directory block
+    dir_entry* dir_entries = reinterpret_cast<dir_entry*>(buffer);
+
+    // Find an empty entry for the new directory
+    int empty_index = -1;
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
+        if (dir_entries[i].file_name[0] == '\0') {  // Check for an empty slot
+            empty_index = i;
+            break;
+        }
+    }
+
+    if (empty_index == -1) {
+        std::cerr << "Error: No empty directory entry available.\n";
+        return -1;  // No space for new directory
+    }
+
+    // Create the new directory entry
+    dir_entry new_dir;
+    std::strncpy(new_dir.file_name, dirpath.c_str(), sizeof(new_dir.file_name) - 1);  // Set the directory name
+    new_dir.size = 0;  // Initially, the directory is empty
+    new_dir.first_blk = FAT_FREE;  // We'll allocate the first block shortly
+    new_dir.type = 1;  // This is a directory
+    new_dir.access_rights = 0;  // Default access rights (you can modify as needed)
+
+    // Find the first free block in the FAT for the new directory's first block
+    int new_block = -1;
+    for (int i = 0; i < BLOCK_SIZE / 2; ++i) {
+        if (fat[i] == FAT_FREE) {
+            new_block = i;
+            fat[i] = FAT_EOF;  // Mark this block as the end of the directory
+            break;
+        }
+    }
+
+    if (new_block == -1) {
+        std::cerr << "Error: No free blocks available for the new directory.\n";
+        return -1;  // No space for directory blocks
+    }
+
+    // Update the new directory's first block
+    new_dir.first_blk = new_block;
+
+    // Create the special ".." entry for the parent directory inside the new directory
+    uint8_t dir_block[BLOCK_SIZE] = {0};  // Clear the block
+    dir_entry* dir_block_entries = reinterpret_cast<dir_entry*>(dir_block);
+
+    // Add the parent directory entry
+    dir_entry parent_entry;
+    std::strncpy(parent_entry.file_name, "..", sizeof(parent_entry.file_name) - 1);
+    parent_entry.size = 0;
+    parent_entry.first_blk = ROOT_BLOCK;  // This is the parent (the root directory in this case)
+    parent_entry.type = 1;  // This is a directory (the parent is a directory)
+    parent_entry.access_rights = 0;
+
+    dir_block_entries[0] = parent_entry;  // Store the parent directory entry
+
+    // Write the new directory block to disk
+    disk.write(new_block, dir_block);
+
+    // Insert the new directory into the root directory's entries
+    dir_entries[empty_index] = new_dir;
+
+    // Write the updated root directory block to disk
+    disk.write(ROOT_BLOCK, reinterpret_cast<uint8_t*>(dir_entries));
+
+    std::cout << "Directory " << dirpath << " created successfully.\n";
     return 0;
 }
 
