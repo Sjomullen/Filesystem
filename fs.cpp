@@ -385,103 +385,129 @@ int FS::rm(std::string filepath) {
 // append <filepath1> <filepath2> appends the contents of file <filepath1> to
 // the end of file <filepath2>. The file <filepath1> is unchanged.
 int FS::append(std::string filepath1, std::string filepath2) {
-    // Step 1: Locate filepath1 and filepath2 in the root directory
-    dir_entry file1_entry, file2_entry;
+    std::cout << "FS::append(" << filepath1 << ", " << filepath2 << ")\n";
+
+    // Buffer to read/write disk blocks
+    uint8_t buffer[BLOCK_SIZE];
+
+    // Locate file1 and file2 in the directory
+    dir_entry file1, file2;
     bool file1_found = false, file2_found = false;
+    disk.read(ROOT_BLOCK, buffer);
+    dir_entry* dir_entries = reinterpret_cast<dir_entry*>(buffer);
 
-    // Read the root directory to find the entries
-    uint8_t block[BLOCK_SIZE];
-    if (disk.read(ROOT_BLOCK, block) != 0) {
-        std::cerr << "ERROR: Failed to read root directory\n";
-        return -1;
-    }
-
-    dir_entry* dir_entries = reinterpret_cast<dir_entry*>(block);
-    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); i++) {
+    for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
         if (std::string(dir_entries[i].file_name) == filepath1) {
-            file1_entry = dir_entries[i];
+            file1 = dir_entries[i];
             file1_found = true;
         }
         if (std::string(dir_entries[i].file_name) == filepath2) {
-            file2_entry = dir_entries[i];
+            file2 = dir_entries[i];
             file2_found = true;
         }
     }
 
-    if (!file1_found) {
-        std::cerr << "ERROR: File " << filepath1 << " not found\n";
+    if (!file1_found || !file2_found) {
+        std::cerr << "Error: One or both files do not exist.\n";
         return -1;
     }
 
-    if (!file2_found) {
-        std::cerr << "ERROR: File " << filepath2 << " not found\n";
+    // Check access rights
+    if (!(file1.access_rights & READ)) {
+        std::cerr << "Error: No read access to " << filepath1 << "\n";
+        return -1;
+    }
+    if (!(file2.access_rights & WRITE)) {
+        std::cerr << "Error: No write access to " << filepath2 << "\n";
         return -1;
     }
 
-    // Step 2: Read the contents of file1 into a buffer
-    std::vector<uint8_t> file1_data;
-    int current_block = file1_entry.first_blk;
+    // Traverse FAT and read content of file1
+    std::vector<uint8_t> file1_content;
+    int16_t current_block = file1.first_blk;
+
     while (current_block != FAT_EOF) {
-        if (disk.read(current_block, block) != 0) {
-            std::cerr << "ERROR: Failed to read data block for " << filepath1 << "\n";
-            return -1;
+        disk.read(current_block, buffer);
+        if (current_block == file1.first_blk) {
+            file1_content.insert(file1_content.end(), buffer, buffer + file1.size);
+        } else {
+            file1_content.insert(file1_content.end(), buffer, buffer + BLOCK_SIZE);
         }
-        file1_data.insert(file1_data.end(), block, block + BLOCK_SIZE);
         current_block = fat[current_block];
     }
 
-    // Step 3: Find the last block of file2
-    int last_block = file2_entry.first_blk;
-    while (fat[last_block] != FAT_EOF) {
-        last_block = fat[last_block];
+    // Traverse FAT to find the last block of file2
+    current_block = file2.first_blk;
+    int16_t last_block = -1;
+    int space_in_last_block = 0;
+
+    while (current_block != FAT_EOF) {
+        last_block = current_block;
+        current_block = fat[current_block];
     }
 
-    // Step 4: Calculate space left in the last block of file2
-    size_t remaining_space_in_last_block = BLOCK_SIZE - (file2_entry.size % BLOCK_SIZE);
+    if (last_block != -1) {
+        // Check if the last block of file2 has space
+        space_in_last_block = BLOCK_SIZE - (file2.size % BLOCK_SIZE);
+    }
 
-    // Step 5: Write data from file1 to file2
+    // Write the content of file1 to file2
+    size_t remaining_data = file1_content.size();
     size_t data_offset = 0;
-    while (data_offset < file1_data.size()) {
-        // If there's remaining space in the last block of file2, use it
-        if (remaining_space_in_last_block > 0) {
-            size_t bytes_to_write = std::min(remaining_space_in_last_block, file1_data.size() - data_offset);
-            disk.write(last_block, file1_data.data() + data_offset, bytes_to_write);
-            data_offset += bytes_to_write;
-            remaining_space_in_last_block -= bytes_to_write;
 
-            // If there's no space left in the last block, allocate a new block
-            if (remaining_space_in_last_block == 0) {
-                int new_block = -1;
-                for (int i = 0; i < BLOCK_SIZE / 2; i++) {
-                    if (fat[i] == FAT_FREE) {
-                        new_block = i;
-                        fat[i] = FAT_EOF; // Mark the new block as EOF initially
-                        break;
-                    }
-                }
-                if (new_block == -1) {
-                    std::cerr << "ERROR: No free blocks available for appending\n";
-                    return -1;
-                }
+    if (space_in_last_block > 0 && last_block != -1) {
+        // Write to the last block if there's space
+        disk.read(last_block, buffer);
+        size_t write_size = std::min(static_cast<size_t>(space_in_last_block), remaining_data);
+        std::memcpy(buffer + (BLOCK_SIZE - space_in_last_block), file1_content.data(), write_size);
+        disk.write(last_block, buffer);
+        remaining_data -= write_size;
+        data_offset += write_size;
+        file2.size += write_size;
+    }
 
-                // Update the FAT to link the last block to the new block
-                fat[last_block] = new_block;
-                last_block = new_block;
-                remaining_space_in_last_block = BLOCK_SIZE;  // Reset space for the new block
+    // Allocate new blocks for remaining data
+    while (remaining_data > 0) {
+        // Find a free block in FAT
+        int16_t new_block = -1;
+        for (int i = 0; i < BLOCK_SIZE / 2; ++i) {
+            if (fat[i] == FAT_FREE) {
+                new_block = i;
+                fat[i] = FAT_EOF;
+                break;
             }
         }
+
+        if (new_block == -1) {
+            std::cerr << "Error: No free blocks available.\n";
+            return -1;
+        }
+
+        if (last_block != -1) {
+            fat[last_block] = new_block;
+        } else {
+            file2.first_blk = new_block;
+        }
+
+        last_block = new_block;
+
+        size_t write_size = std::min(static_cast<size_t>(BLOCK_SIZE), remaining_data);
+        std::memcpy(buffer, file1_content.data() + data_offset, write_size);
+        disk.write(new_block, buffer);
+        remaining_data -= write_size;
+        data_offset += write_size;
+        file2.size += write_size;
     }
 
-    // Step 6: Update the FAT for file2 (mark the last block as EOF)
-    fat[last_block] = FAT_EOF;
+    // Update the FAT and directory entries on disk
+    disk.write(FAT_BLOCK, reinterpret_cast<uint8_t*>(fat));
+    std::memcpy(dir_entries, &file2, sizeof(dir_entry));
+    disk.write(ROOT_BLOCK, buffer);
 
-    // Step 7: Update the size of file2 in the directory entry
-    file2_entry.size += file1_data.size();
-    disk.write(ROOT_BLOCK, block);  // Write the updated directory entry back to disk
-
-    std::cout << "File " << filepath1 << " successfully appended to " << filepath2 << "\n";
-    return 0; // Successfully appended
+    return 0;
 }
+
+
 
 
 
