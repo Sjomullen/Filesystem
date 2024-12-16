@@ -189,9 +189,9 @@ int FS::cat(std::string filepath) {
 
 // ls lists the content in the currect directory (files and sub-directories)
 int FS::ls() {
-    uint8_t root_block[BLOCK_SIZE];
-    disk.read(ROOT_BLOCK, root_block);
-    dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
+    uint8_t buffer[BLOCK_SIZE];
+    disk.read(ROOT_BLOCK, buffer);
+    dir_entry* dir_entries = reinterpret_cast<dir_entry*>(buffer);
 
     // Print header line with type
     std::cout << "name\ttype\tsize\n";
