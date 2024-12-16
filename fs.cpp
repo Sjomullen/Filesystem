@@ -193,8 +193,8 @@ int FS::ls() {
     disk.read(ROOT_BLOCK, root_block);
     dir_entry* root_entries = reinterpret_cast<dir_entry*>(root_block);
 
-    // Print header line
-    std::cout << "name\tsize\n";
+    // Print header line with type
+    std::cout << "name\ttype\tsize\n";
 
     // Iterate through root directory entries and print files/directories
     for (int i = 0; i < BLOCK_SIZE / sizeof(dir_entry); ++i) {
