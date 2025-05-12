@@ -29,6 +29,8 @@ struct dir_entry {
     uint8_t  access_rights;      // read (0x04), write (0x02), execute (0x01)
 };
 
+constexpr size_t MAX_NAME_LEN = sizeof(dir_entry::file_name) - 1;
+
 class FS {
 private:
     Disk disk;
@@ -47,6 +49,8 @@ private:
     int resolve_path(const std::string &path,
                      uint16_t &out_dir,
                      std::string &out_name);
+
+    int find_free_block();
 
 public:
     FS();

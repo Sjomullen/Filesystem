@@ -131,6 +131,11 @@ int FS::create(std::string filepath) {
     if (resolve_path(filepath, dirblk, name) != 0 || name.empty())
         return -1;
 
+    if (name.length() > MAX_NAME_LEN) {
+        std::cout << "Error: File name too long (max 55 characters allowed)\n";
+        return -1;
+    }
+
     // load directory
     uint8_t dirbuf[BLOCK_SIZE];
     disk.read(dirblk, dirbuf);
@@ -160,7 +165,8 @@ int FS::create(std::string filepath) {
 
     // new entry
     dir_entry nde = {};
-    std::strncpy(nde.file_name, name.c_str(), sizeof(nde.file_name)-1);
+    std::strncpy(nde.file_name, name.c_str(), MAX_NAME_LEN);
+    nde.file_name[MAX_NAME_LEN] = '\0';
     nde.size          = data.size();
     nde.first_blk     = first;
     nde.type          = TYPE_FILE;
@@ -299,6 +305,11 @@ int FS::cp(std::string sourcepath, std::string destpath) {
         dname = destpath;
     }
 
+        if (dname.length() > MAX_NAME_LEN) {
+        std::cout << "Error: Destination name too long (max " << MAX_NAME_LEN << " characters)\n";
+        return -1;
+    }
+
     // read src data
     std::vector<uint8_t> data;
     {
@@ -320,7 +331,8 @@ int FS::cp(std::string sourcepath, std::string destpath) {
     uint8_t dbuf[BLOCK_SIZE]; disk.read(ddir,dbuf);
     auto *dents = reinterpret_cast<dir_entry*>(dbuf);
     dir_entry nde={};
-    std::strncpy(nde.file_name,dname.c_str(),sizeof(nde.file_name)-1);
+    std::strncpy(nde.file_name, dname.c_str(), MAX_NAME_LEN);
+    nde.file_name[MAX_NAME_LEN] = '\0';
     nde.type=TYPE_FILE; nde.first_blk=first; nde.size=src->size;
     nde.access_rights=src->access_rights;
     for(int i=0;i<slots;++i){
@@ -364,6 +376,12 @@ int FS::mv(std::string sourcepath, std::string destpath) {
         ddir = sdir;
         dname = destpath;
     }
+    
+    if (dname.length() > MAX_NAME_LEN) {
+    std::cout << "Error: New name too long (max " << MAX_NAME_LEN << " characters)\n";
+    return -1;
+    }
+
 
     if(into_dir) {
         // remove from sdir, insert into ddir
@@ -379,8 +397,9 @@ int FS::mv(std::string sourcepath, std::string destpath) {
         disk.write(ddir,db);
     } else {
         // rename in place
-        std::strncpy(sents[idx].file_name, dname.c_str(),
-                     sizeof(sents[idx].file_name)-1);
+        std::strncpy(sents[idx].file_name, dname.c_str(), MAX_NAME_LEN);
+        sents[idx].file_name[MAX_NAME_LEN] = '\0';
+
         disk.write(sdir,sb);
     }
     std::cout<<"File renamed successfully\n";
@@ -464,7 +483,68 @@ int FS::append(std::string f1, std::string f2) {
         return -1;
     }
 
-    // --- existing append logic goes here ---
+    // Read entire content of f1
+    std::vector<uint8_t> data;
+    uint16_t blk = ent1->first_blk;
+    int remaining = ent1->size;
+    while (blk != FAT_EOF && remaining > 0) {
+        uint8_t temp[BLOCK_SIZE];
+        disk.read(blk, temp);
+        int to_copy = std::min(remaining, BLOCK_SIZE);
+        data.insert(data.end(), temp, temp + to_copy);
+        remaining -= to_copy;
+        blk = fat[blk];
+    }
+
+    // Now write this data to the end of f2
+    uint16_t last_blk = ent2->first_blk;
+    if (last_blk == FAT_EOF) {
+        // Empty file, allocate first block
+        last_blk = find_free_block();
+        if (last_blk == -1) return -1;
+        ent2->first_blk = last_blk;
+        fat[last_blk] = FAT_EOF;
+    } else {
+        // Traverse to last block
+        while (fat[last_blk] != FAT_EOF) {
+            last_blk = fat[last_blk];
+        }
+    }
+
+    // Determine where to start writing
+    int f2_offset = ent2->size % BLOCK_SIZE;
+    int f2_written = 0;
+    blk = last_blk;
+    uint8_t temp[BLOCK_SIZE];
+    if (f2_offset != 0) {
+        disk.read(blk, temp);
+    } else {
+        std::fill(temp, temp + BLOCK_SIZE, 0);
+    }
+
+    for (size_t i = 0; i < data.size(); ++i) {
+        temp[f2_offset++] = data[i];
+        ent2->size++;
+        f2_written++;
+
+        if (f2_offset == BLOCK_SIZE) {
+            disk.write(blk, temp);
+            // Allocate next block
+            uint16_t new_blk = find_free_block();
+            if (new_blk == -1) return -1;
+            fat[blk] = new_blk;
+            fat[new_blk] = FAT_EOF;
+            blk = new_blk;
+            f2_offset = 0;
+            std::fill(temp, temp + BLOCK_SIZE, 0);
+        }
+    }
+
+    // Write last block
+    disk.write(blk, temp);
+
+    // Update directory entry and write it back
+    disk.write(d2, b2);
 
     return 0;
 }
@@ -473,6 +553,12 @@ int FS::append(std::string f1, std::string f2) {
 int FS::mkdir(std::string dirpath) {
     uint16_t parent; std::string name;
     if(resolve_path(dirpath,parent,name)!=0||name.empty()) return -1;
+    
+    if (name.length() > MAX_NAME_LEN) {
+    std::cout << "Error: Directory name too long (max " << MAX_NAME_LEN << " characters)\n";
+    return -1;
+    }
+
 
     uint8_t buf[BLOCK_SIZE]; disk.read(parent,buf);
     auto *ents = reinterpret_cast<dir_entry*>(buf);
@@ -497,7 +583,8 @@ int FS::mkdir(std::string dirpath) {
     // add to parent
     for(int i=0;i<slots;++i){
         if(!ents[i].file_name[0]){
-            std::strncpy(ents[i].file_name,name.c_str(),sizeof(ents[i].file_name)-1);
+            std::strncpy(ents[i].file_name, name.c_str(), MAX_NAME_LEN);
+            ents[i].file_name[MAX_NAME_LEN] = '\0';
             ents[i].first_blk=nb; ents[i].type=TYPE_DIR; ents[i].size=0; ents[i].access_rights=READ|WRITE|EXECUTE;
             break;
         }
@@ -578,4 +665,12 @@ uint16_t FS::get_parent_directory(uint16_t dir_block) {
             return ents[i].first_blk;
     }
     return ROOT_BLOCK;
+}
+
+int FS::find_free_block() {
+    for (int i = 2; i < BLOCK_SIZE / 2; ++i) { // Skip ROOT and FAT
+        if (fat[i] == FAT_FREE)
+            return i;
+    }
+    return -1; // Disk full
 }
